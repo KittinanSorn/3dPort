@@ -39,6 +39,7 @@
       width: 100%;
       height: 100%;
       display: block;
+      cursor: pointer;
     }
     #loading {
       position: absolute;
@@ -48,11 +49,45 @@
       font-size: 1.2rem;
       color: #ffffff;
     }
+    #hint-text {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      padding: 8px 14px;
+      background: rgba(0, 0, 0, 0.6);
+      color: #ffffff;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #reset-btn {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      padding: 10px 18px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      display: none;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    #reset-btn:hover {
+      background: #0056b3;
+    }
   </style>
-  <!-- โหลด Three.js, OrbitControls และ GLTFLoader -->
+  <!-- โหลด Three.js, OrbitControls, GLTFLoader และ GSAP -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
 </head>
 <body>
 
@@ -60,48 +95,64 @@
   
   <div id="canvas-container">
     <div id="loading">กำลังโหลดโมเดล 3D...</div>
+    <div id="hint-text">💡 คลิกเพื่อซูม</div>
+    <button id="reset-btn">มุมมองเดิม</button>
   </div>
 
   <script>
     const container = document.getElementById('canvas-container');
     const loadingEl = document.getElementById('loading');
+    const resetBtn = document.getElementById('reset-btn');
 
     // 1. Scene, Camera, Renderer
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x333333);
 
-    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
-    camera.position.set(15, 12, 18);
+    const camera = new THREE.PerspectiveCamera(30, container.clientWidth / container.clientHeight, 0.1, 1000);
+    const initialCamPos = new THREE.Vector3(45, 10, 18);
+    camera.position.copy(initialCamPos);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.shadowMap.enabled = true;
+    renderer.outputEncoding = THREE.sRGBEncoding;
     container.appendChild(renderer.domElement);
 
     // 2. Orbit Controls
     const controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
 
+    // 3. Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
+    scene.add(ambientLight);
 
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(10, 20, 10);
+    dirLight.castShadow = true;
+    scene.add(dirLight);
 
-    // 4. Load bg1.glb จาก GitHub Repository ของคุณ
+    // Raycaster
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let loadedModel = null;
+    let initialTarget = new THREE.Vector3();
+
+    // 4. Load Model
     const loader = new THREE.GLTFLoader();
-    
-    // ดึงไฟล์จาก Path ในโฟลเดอร์ 3dmodel
-    const modelUrl = 'https://raw.githubusercontent.com/KittinanSorn/KittinanSorn.github.io/main/3dmodel/bg3.glb';
+    const modelUrl = 'https://raw.githubusercontent.com/KittinanSorn/KittinanSorn.github.io/main/3dmodel/bg5.glb';
 
     loader.load(
       modelUrl, 
       function (gltf) {
-        const model = gltf.scene;
-        scene.add(model);
+        loadedModel = gltf.scene;
+        scene.add(loadedModel);
         loadingEl.style.display = 'none';
 
-        // ปรับมุมกล้องและโฟกัสให้อยู่ตรงกลางโมเดลอัตโนมัติ
-        const box = new THREE.Box3().setFromObject(model);
-        const center = box.getCenter(new THREE.Vector3());
-        controls.target.copy(center);
+        // คำนวณจุดศูนย์กลางฉากตั้งต้น
+        const box = new THREE.Box3().setFromObject(loadedModel);
+        box.getCenter(initialTarget);
+        controls.target.copy(initialTarget);
         controls.update();
       },
       function (xhr) {
@@ -116,7 +167,83 @@
       }
     );
 
-    // 5. Render Loop & Resize
+    // Function ซูมเข้าหาตำแหน่งที่คลิกแบบตั้งตรง 100%
+    function zoomToIntersection(intersect) {
+      // 1. ดึงจุดที่โดนคลิกจริงในฉาก (World Position)
+      const hitPoint = intersect.point.clone();
+      
+      // 2. คำนวณทิศทางด้านหน้าของผิวที่โดนคลิก (Surface Normal)
+      const normal = intersect.face.normal.clone();
+      normal.transformDirection(intersect.object.matrixWorld);
+
+      // 3. ระยะซูมถอยออกจากหน้าป้าย
+      const zoomDistance = 18.5; 
+      
+      // ถอยกล้องออกมาทางทิศหน้าตรงของผิวป้าย
+      const newCamPos = hitPoint.clone().add(normal.multiplyScalar(zoomDistance));
+
+      // 4. เลื่อนจุดซูม (Controls Target)
+      gsap.to(controls.target, {
+        x: hitPoint.x,
+        y: hitPoint.y,
+        z: hitPoint.z,
+        duration: 1.2,
+        ease: 'power2.out'
+      });
+
+      // 5. เลื่อนตำแหน่งกล้อง
+      gsap.to(camera.position, {
+        x: newCamPos.x,
+        y: newCamPos.y,
+        z: newCamPos.z,
+        duration: 1.2,
+        ease: 'power2.out',
+        onUpdate: () => controls.update()
+      });
+
+      resetBtn.style.display = 'block';
+    }
+
+    // ตรวจจับการกดคลิก
+    renderer.domElement.addEventListener('click', (event) => {
+      if (!loadedModel) return;
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(loadedModel.children, true);
+
+      if (intersects.length > 0) {
+        // ส่งข้อมูลจุดตัดและผิวป้ายไปคำนวณซูมหน้าตรง
+        zoomToIntersection(intersects[0]);
+      }
+    });
+
+    // ปุ่ม Reset มุมมองเดิม
+    resetBtn.addEventListener('click', () => {
+      gsap.to(controls.target, {
+        x: initialTarget.x,
+        y: initialTarget.y,
+        z: initialTarget.z,
+        duration: 1.2,
+        ease: 'power2.out'
+      });
+
+      gsap.to(camera.position, {
+        x: initialCamPos.x,
+        y: initialCamPos.y,
+        z: initialCamPos.z,
+        duration: 1.2,
+        ease: 'power2.out',
+        onUpdate: () => controls.update()
+      });
+
+      resetBtn.style.display = 'none';
+    });
+
+    // Render Loop & Resize
     function animate() {
       requestAnimationFrame(animate);
       controls.update();
